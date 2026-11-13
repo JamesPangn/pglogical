@@ -523,9 +523,18 @@ handle_origin(StringInfo s)
 static void
 handle_relation(StringInfo s)
 {
-	multi_insert_finish();
+	bool started_tx;
 
-	(void) pglogical_read_rel(s);
+	multi_insert_finish();
+	started_tx = ensure_transaction();
+	(void) pglogical_read_rel(s, MySubscription->id);
+	if (started_tx)
+	{
+		apply_api.on_commit();
+		CommitTransactionCommand();
+		MemoryContextSwitchTo(TopMemoryContext);
+		MemoryContextSwitchTo(MessageContext);
+	}
 }
 
 static void

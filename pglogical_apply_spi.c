@@ -117,7 +117,7 @@ pglogical_apply_spi_insert(PGLogicalRelation *rel, PGLogicalTupleData *newtup)
 
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "INSERT INTO %s (",
-					 quote_qualified_identifier(rel->nspname, rel->relname));
+					 quote_qualified_identifier(PGLOGICAL_LOCAL_NSPNAME(rel), PGLOGICAL_LOCAL_RELNAME(rel)));
 
 	for (att = 0, narg = 0; att < desc->natts; att++)
 	{
@@ -189,7 +189,7 @@ pglogical_apply_spi_update(PGLogicalRelation *rel, PGLogicalTupleData *oldtup,
 
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "UPDATE %s SET ",
-					 quote_qualified_identifier(rel->nspname, rel->relname));
+					 quote_qualified_identifier(PGLOGICAL_LOCAL_NSPNAME(rel), PGLOGICAL_LOCAL_RELNAME(rel)));
 
 	for (att = 0, narg = 0; att < desc->natts; att++)
 	{
@@ -266,7 +266,7 @@ pglogical_apply_spi_delete(PGLogicalRelation *rel, PGLogicalTupleData *oldtup)
 
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "DELETE FROM %s WHERE",
-					 quote_qualified_identifier(rel->nspname, rel->relname));
+					 quote_qualified_identifier(PGLOGICAL_LOCAL_NSPNAME(rel), PGLOGICAL_LOCAL_RELNAME(rel)));
 
 	for (att = 0, narg = 0; att < desc->natts; att++)
 	{
@@ -413,8 +413,8 @@ pglogical_start_copy(PGLogicalRelation *rel)
 	pglcstate->copy_stmt = makeStringInfo();
 	appendStringInfo(pglcstate->copy_stmt, "COPY %s.%s (%s) FROM STDIN "
 					 "WITH (FORMAT BINARY)",
-					 quote_identifier(rel->nspname),
-					 quote_identifier(rel->relname),
+					 quote_identifier(PGLOGICAL_LOCAL_NSPNAME(rel)),
+					 quote_identifier(PGLOGICAL_LOCAL_RELNAME(rel)),
 					 attrnames.data);
 	pfree(attrnames.data);
 

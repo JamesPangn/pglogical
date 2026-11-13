@@ -13,6 +13,7 @@
 #include "postgres.h"
 
 #include "access/sysattr.h"
+#include "access/genam.h"
 #if PG_VERSION_NUM >= 130000
 #include "access/detoast.h"
 #else
@@ -23,6 +24,7 @@
 #include "nodes/parsenodes.h"
 #include "replication/reorderbuffer.h"
 #include "utils/lsyscache.h"
+#include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -44,6 +46,56 @@ static char decide_datum_transfer(Form_pg_attribute att,
 
 static void pglogical_read_attrs(StringInfo in, char ***attrnames,
 								  int *nattrnames);
+
+static void
+lookup_subscription_mapping(Oid subid, const char *schemaname,
+							const char *relname, Relation mapping_rel,
+							char **local_schemaname, char **local_relname)
+{
+	SysScanDesc scan;
+	HeapTuple tuple;
+	TupleDesc desc = RelationGetDescr(mapping_rel);
+	ScanKeyData keys[3];
+	Datum datum;
+	bool isnull;
+
+	/* Schema mapping: source_table is NULL; preserve the source table name. */
+	ScanKeyInit(&keys[0], 1, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(subid));
+	ScanKeyInit(&keys[1], 2, BTEqualStrategyNumber, F_NAMEEQ,
+				DirectFunctionCall1(namein, CStringGetDatum(schemaname)));
+	scan = systable_beginscan(mapping_rel, 0, true, NULL, 2, keys);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		datum = heap_getattr(tuple, 3, desc, &isnull);
+		if (!isnull)
+			continue;
+		datum = heap_getattr(tuple, 4, desc, &isnull);
+		if (!isnull)
+			*local_schemaname = pstrdup(NameStr(*DatumGetName(datum)));
+		break;
+	}
+	systable_endscan(scan);
+
+	/* Table mapping, if present, can override either local name. */
+	ScanKeyInit(&keys[2], 3, BTEqualStrategyNumber, F_NAMEEQ,
+				DirectFunctionCall1(namein, CStringGetDatum(relname)));
+	scan = systable_beginscan(mapping_rel, 0, true, NULL, 3, keys);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		datum = heap_getattr(tuple, 3, desc, &isnull);
+		if (isnull)
+			continue;
+		datum = heap_getattr(tuple, 4, desc, &isnull);
+		if (!isnull)
+			*local_schemaname = pstrdup(NameStr(*DatumGetName(datum)));
+		datum = heap_getattr(tuple, 5, desc, &isnull);
+		if (!isnull)
+			*local_relname = pstrdup(NameStr(*DatumGetName(datum)));
+		break;
+	}
+	systable_endscan(scan);
+}
 static void pglogical_read_tuple(StringInfo in, PGLogicalRelation *rel,
 					  PGLogicalTupleData *tuple);
 
@@ -897,7 +949,7 @@ pglogical_read_tuple(StringInfo in, PGLogicalRelation *rel,
  * lockmode.
  */
 uint32
-pglogical_read_rel(StringInfo in)
+pglogical_read_rel(StringInfo in, Oid subid)
 {
 	uint8		flags;
 	uint32		relid;
@@ -906,6 +958,9 @@ pglogical_read_rel(StringInfo in)
 	char	   *relname;
 	int			natts;
 	char	  **attrnames;
+	char	   *local_schemaname = NULL;
+	char	   *local_relname = NULL;
+	Relation mapping_rel;
 
 	/* read the flags */
 	flags = pq_getmsgbyte(in);
@@ -924,7 +979,15 @@ pglogical_read_rel(StringInfo in)
 	/* Get attribute description */
 	pglogical_read_attrs(in, &attrnames, &natts);
 
-	pglogical_relation_cache_update(relid, schemaname, relname, natts, attrnames);
+	mapping_rel = table_openrv(makeRangeVar("pglogical", "subscription_mapping", -1),
+								 AccessShareLock);
+	lookup_subscription_mapping(subid, schemaname, relname, mapping_rel,
+								&local_schemaname, &local_relname);
+	table_close(mapping_rel, AccessShareLock);
+
+	pglogical_relation_cache_update(relid, schemaname, relname,
+									local_schemaname, local_relname,
+									natts, attrnames);
 
 	return relid;
 }

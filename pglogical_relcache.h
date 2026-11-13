@@ -33,6 +33,9 @@ typedef struct PGLogicalRelation
 	uint32		remoteid;
 	char	   *nspname;
 	char	   *relname;
+	/* Subscriber-side names; default to the remote names. */
+	char	   *local_nspname;
+	char	   *local_relname;
 	int			natts;
 	char	  **attnames;
 
@@ -45,8 +48,14 @@ typedef struct PGLogicalRelation
 	bool		hasTriggers;
 } PGLogicalRelation;
 
+#define PGLOGICAL_LOCAL_NSPNAME(rel) \
+	((rel)->local_nspname != NULL ? (rel)->local_nspname : (rel)->nspname)
+#define PGLOGICAL_LOCAL_RELNAME(rel) \
+	((rel)->local_relname != NULL ? (rel)->local_relname : (rel)->relname)
+
 extern void pglogical_relation_cache_update(uint32 remoteid,
-											 char *schemaname, char *relname,
+												 char *schemaname, char *relname,
+												 char *local_schemaname, char *local_relname,
 											 int natts, char **attnames);
 extern void pglogical_relation_cache_updater(PGLogicalRemoteRel *remoterel);
 

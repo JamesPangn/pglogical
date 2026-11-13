@@ -40,6 +40,10 @@ relcache_free_entry(PGLogicalRelation *entry)
 {
 	pfree(entry->nspname);
 	pfree(entry->relname);
+	if (entry->local_nspname != NULL)
+		pfree(entry->local_nspname);
+	if (entry->local_relname != NULL)
+		pfree(entry->local_relname);
 
 	if (entry->natts > 0)
 	{
@@ -83,8 +87,8 @@ pglogical_relation_open(uint32 remoteid, LOCKMODE lockmode)
 		RangeVar   *rv = makeNode(RangeVar);
 		TupleDesc	desc;
 
-		rv->schemaname = (char *) entry->nspname;
-		rv->relname = (char *) entry->relname;
+		rv->schemaname = PGLOGICAL_LOCAL_NSPNAME(entry);
+		rv->relname = PGLOGICAL_LOCAL_RELNAME(entry);
 		entry->rel = table_openrv(rv, lockmode);
 
 		desc = RelationGetDescr(entry->rel);
@@ -123,7 +127,8 @@ pglogical_relation_open(uint32 remoteid, LOCKMODE lockmode)
 
 void
 pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
-								 char *relname, int natts, char **attnames)
+								 char *relname, char *local_schemaname,
+								 char *local_relname, int natts, char **attnames)
 {
 	MemoryContext		oldcontext;
 	PGLogicalRelation  *entry;
@@ -146,6 +151,8 @@ pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
 	oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 	entry->nspname = pstrdup(schemaname);
 	entry->relname = pstrdup(relname);
+	entry->local_nspname = pstrdup(local_schemaname ? local_schemaname : schemaname);
+	entry->local_relname = pstrdup(local_relname ? local_relname : relname);
 	entry->natts = natts;
 	entry->attnames = palloc(natts * sizeof(char *));
 	for (i = 0; i < natts; i++)
@@ -182,6 +189,8 @@ pglogical_relation_cache_updater(PGLogicalRemoteRel *remoterel)
 	oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 	entry->nspname = pstrdup(remoterel->nspname);
 	entry->relname = pstrdup(remoterel->relname);
+	entry->local_nspname = pstrdup(remoterel->nspname);
+	entry->local_relname = pstrdup(remoterel->relname);
 	entry->natts = remoterel->natts;
 	entry->attnames = palloc(remoterel->natts * sizeof(char *));
 	for (i = 0; i < remoterel->natts; i++)
