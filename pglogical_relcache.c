@@ -192,6 +192,11 @@ pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
 	MemoryContext		oldcontext;
 	PGLogicalRelation  *entry;
 	bool				found;
+	bool				mapping_changed;
+	char			   *resolved_nspname;
+	char			   *resolved_relname;
+	char			   *cached_nspname = NULL;
+	char			   *cached_relname = NULL;
 	int					i;
 
 	if (PGLogicalRelationHash == NULL)
@@ -203,15 +208,39 @@ pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
 	entry = hash_search(PGLogicalRelationHash, (void *) &remoteid,
 						HASH_ENTER, &found);
 
+	resolved_nspname = local_schemaname ? local_schemaname : schemaname;
+	resolved_relname = local_relname ? local_relname : relname;
+	mapping_changed = !found ||
+		strcmp(PGLOGICAL_LOCAL_NSPNAME(entry), resolved_nspname) != 0 ||
+		strcmp(PGLOGICAL_LOCAL_RELNAME(entry), resolved_relname) != 0;
+
 	if (found)
+	{
+		/* Preserve the local mapping when it is unchanged. */
+		if (!mapping_changed)
+		{
+			cached_nspname = entry->local_nspname;
+			cached_relname = entry->local_relname;
+			entry->local_nspname = NULL;
+			entry->local_relname = NULL;
+		}
 		relcache_free_entry(entry);
+	}
 
 	/* Make cached copy of the data */
 	oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 	entry->nspname = pstrdup(schemaname);
 	entry->relname = pstrdup(relname);
-	entry->local_nspname = pstrdup(local_schemaname ? local_schemaname : schemaname);
-	entry->local_relname = pstrdup(local_relname ? local_relname : relname);
+	if (mapping_changed)
+	{
+		entry->local_nspname = pstrdup(resolved_nspname);
+		entry->local_relname = pstrdup(resolved_relname);
+	}
+	else
+	{
+		entry->local_nspname = cached_nspname;
+		entry->local_relname = cached_relname;
+	}
 	entry->natts = natts;
 	entry->attnames = palloc(natts * sizeof(char *));
 	for (i = 0; i < natts; i++)

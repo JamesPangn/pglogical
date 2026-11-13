@@ -67,11 +67,12 @@ SELECT pglogical.alter_subscription_remove_mapping(
 
 ## Operational notes
 
-- Configure mappings before the apply worker processes relation metadata for
-  the provider tables. The apply worker resolves mappings when it handles a
-  `RELATION` message, then reuses its cache for row changes. If mappings are
-  changed after relations are cached, restart or disable and re-enable the
-  subscription so relation metadata is received and resolved again.
+- The apply worker resolves mappings whenever it handles a `RELATION` message,
+  then reuses its cache for row changes. If a mapping changes after a relation
+  was cached, the new mapping is applied when the provider next sends that
+  relation's metadata. Restart, or disable and re-enable the subscription,
+  after changing mappings to force a fresh decoding session and refresh the
+  provider and subscriber relation metadata caches.
 - Streamed row changes and initial table data copy use the mapping. Initial
   copy reads the provider's source relation and writes to the mapped subscriber
   relation. Create mapped target schemas and tables before starting the
