@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/heapam.h"
 
 #include "catalog/pg_trigger.h"
@@ -19,9 +20,9 @@
 #include "commands/trigger.h"
 
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/catcache.h"
 #include "utils/hsearch.h"
-#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/rel.h"
 
@@ -34,6 +35,64 @@ static HTAB *PGLogicalRelationHash = NULL;
 
 static void pglogical_relcache_init(void);
 static int tupdesc_get_att_by_name(TupleDesc desc, const char *attname);
+
+void
+pglogical_get_local_relation_names(Oid subid, const char *remote_nspname,
+								   const char *remote_relname,
+								   char **local_nspname, char **local_relname)
+{
+	RangeVar *rv = makeRangeVar("pglogical", "subscription_mapping", -1);
+	Relation maprel;
+	TupleDesc desc;
+	ScanKeyData keys[3];
+	SysScanDesc scan;
+	HeapTuple tuple;
+	Datum datum;
+	bool isnull;
+
+	*local_nspname = NULL;
+	*local_relname = NULL;
+	maprel = table_openrv(rv, AccessShareLock);
+	desc = RelationGetDescr(maprel);
+
+	/* Apply the schema mapping first. */
+	ScanKeyInit(&keys[0], 1, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(subid));
+	ScanKeyInit(&keys[1], 2, BTEqualStrategyNumber, F_NAMEEQ,
+				DirectFunctionCall1(namein, CStringGetDatum(remote_nspname)));
+	scan = systable_beginscan(maprel, 0, true, NULL, 2, keys);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		datum = heap_getattr(tuple, 3, desc, &isnull);
+		if (!isnull)
+			continue;
+		datum = heap_getattr(tuple, 4, desc, &isnull);
+		if (!isnull)
+			*local_nspname = pstrdup(NameStr(*DatumGetName(datum)));
+		break;
+	}
+	systable_endscan(scan);
+
+	/* An exact table mapping overrides the schema mapping. */
+	ScanKeyInit(&keys[2], 3, BTEqualStrategyNumber, F_NAMEEQ,
+				DirectFunctionCall1(namein, CStringGetDatum(remote_relname)));
+	scan = systable_beginscan(maprel, 0, true, NULL, 3, keys);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		datum = heap_getattr(tuple, 3, desc, &isnull);
+		if (isnull)
+			continue;
+		datum = heap_getattr(tuple, 4, desc, &isnull);
+		if (!isnull)
+			*local_nspname = pstrdup(NameStr(*DatumGetName(datum)));
+		datum = heap_getattr(tuple, 5, desc, &isnull);
+		if (!isnull)
+			*local_relname = pstrdup(NameStr(*DatumGetName(datum)));
+		break;
+	}
+	systable_endscan(scan);
+	table_close(maprel, AccessShareLock);
+}
 
 static void
 relcache_free_entry(PGLogicalRelation *entry)

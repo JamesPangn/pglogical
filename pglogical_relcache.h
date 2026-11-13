@@ -58,6 +58,11 @@ extern void pglogical_relation_cache_update(uint32 remoteid,
 												 char *local_schemaname, char *local_relname,
 											 int natts, char **attnames);
 extern void pglogical_relation_cache_updater(PGLogicalRemoteRel *remoterel);
+extern void pglogical_get_local_relation_names(Oid subid,
+											   const char *remote_nspname,
+											   const char *remote_relname,
+											   char **local_nspname,
+											   char **local_relname);
 
 extern PGLogicalRelation *pglogical_relation_open(uint32 remoteid,
 												   LOCKMODE lockmode);
