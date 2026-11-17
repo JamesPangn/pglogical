@@ -737,6 +737,18 @@ can be either set in `postgresql.conf` or via `ALTER SYSTEM SET`.
 
   The default is `LOG`.
 
+- `pglogical.conflict_log_types`
+  Sets which detected conflict types are reported in the server log. Valid
+  values are `all` or a comma-separated list containing any of
+  `insert_insert`, `update_update`, `update_delete`, and `delete_delete`.
+  The default is `all`, which preserves the existing behavior. For example,
+  to log insert and update row collisions but omit reports for remote updates
+  or deletes whose target row is missing locally, set:
+
+  ```conf
+  pglogical.conflict_log_types = 'insert_insert,update_update'
+  ```
+
 - `pglogical.batch_inserts`
   Tells PGLogical to use batch insert mechanism if possible. Batch mechanism
   uses PostgreSQL internal batch insert mode which is also used by `COPY`

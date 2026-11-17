@@ -39,6 +39,7 @@ typedef enum
 
 extern int pglogical_conflict_resolver;
 extern int pglogical_conflict_log_level;
+extern char *pglogical_conflict_log_types;
 
 typedef enum PGLogicalConflictType
 {
@@ -81,5 +82,8 @@ extern void pglogical_report_conflict(PGLogicalConflictType conflict_type,
 
 extern bool pglogical_conflict_resolver_check_hook(int *newval, void **extra,
 									   GucSource source);
+extern bool pglogical_conflict_log_types_check_hook(char **newval,
+											void **extra,
+											GucSource source);
 
 #endif /* PGLOGICAL_CONGLICT_H */

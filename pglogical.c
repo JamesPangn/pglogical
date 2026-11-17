@@ -842,6 +842,14 @@ _PG_init(void)
 							 PGC_SUSET, 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomStringVariable("pglogical.conflict_log_types",
+							   gettext_noop("Conflict types to report in the server log."),
+							   NULL,
+							   &pglogical_conflict_log_types,
+							   "all", PGC_SUSET, 0,
+							   pglogical_conflict_log_types_check_hook,
+							   NULL, NULL);
+
 	DefineCustomBoolVariable("pglogical.synchronous_commit",
 							 "pglogical specific synchronous commit value",
 							 NULL,

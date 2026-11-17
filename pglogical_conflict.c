@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 
+#include <ctype.h>
+
 #include "miscadmin.h"
 
 #include "access/commit_ts.h"
@@ -48,6 +50,7 @@
 
 int		pglogical_conflict_resolver = PGLOGICAL_RESOLVE_APPLY_REMOTE;
 int		pglogical_conflict_log_level = LOG;
+char   *pglogical_conflict_log_types = "all";
 
 static void tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc,
 	HeapTuple tuple);
@@ -624,6 +627,130 @@ conflict_resolution_to_string(PGLogicalConflictResolution resolution)
 	return NULL;
 }
 
+/* Return whether the configured conflict type list includes this conflict. */
+static bool
+pglogical_should_log_conflict(PGLogicalConflictType conflict_type)
+{
+	const char *conflict_name;
+	const char *cursor = pglogical_conflict_log_types;
+
+	switch (conflict_type)
+	{
+		case CONFLICT_INSERT_INSERT:
+			conflict_name = "insert_insert";
+			break;
+		case CONFLICT_UPDATE_UPDATE:
+			conflict_name = "update_update";
+			break;
+		case CONFLICT_UPDATE_DELETE:
+			conflict_name = "update_delete";
+			break;
+		case CONFLICT_DELETE_DELETE:
+			conflict_name = "delete_delete";
+			break;
+		default:
+			return false;
+	}
+
+	while (*cursor != '\0')
+	{
+		const char *start;
+		const char *end;
+		size_t len;
+
+		while (isspace((unsigned char) *cursor))
+			cursor++;
+		start = cursor;
+		while (*cursor != '\0' && *cursor != ',')
+			cursor++;
+		end = cursor;
+		while (end > start && isspace((unsigned char) end[-1]))
+			end--;
+		len = end - start;
+
+		if ((len == 3 && pg_strncasecmp(start, "all", len) == 0) ||
+			(len == strlen(conflict_name) &&
+			 pg_strncasecmp(start, conflict_name, len) == 0))
+			return true;
+
+		if (*cursor == ',')
+			cursor++;
+	}
+
+	return false;
+}
+
+/* Validate pglogical.conflict_log_types. */
+bool
+pglogical_conflict_log_types_check_hook(char **newval, void **extra,
+										GucSource source)
+{
+	const char *cursor = *newval;
+	bool saw_type = false;
+	bool saw_all = false;
+
+	(void) extra;
+	(void) source;
+
+	while (*cursor != '\0')
+	{
+		const char *start;
+		const char *end;
+		size_t len;
+
+		while (isspace((unsigned char) *cursor))
+			cursor++;
+		start = cursor;
+		while (*cursor != '\0' && *cursor != ',')
+			cursor++;
+		end = cursor;
+		while (end > start && isspace((unsigned char) end[-1]))
+			end--;
+		len = end - start;
+
+		if (len == 0)
+		{
+			GUC_check_errdetail("Conflict log types must be a comma-separated list of conflict types.");
+			return false;
+		}
+		if (len == 3 && pg_strncasecmp(start, "all", len) == 0)
+			saw_all = true;
+		else if ((len == 13 && pg_strncasecmp(start, "insert_insert", len) == 0) ||
+				 (len == 13 && pg_strncasecmp(start, "update_update", len) == 0) ||
+				 (len == 13 && pg_strncasecmp(start, "update_delete", len) == 0) ||
+				 (len == 13 && pg_strncasecmp(start, "delete_delete", len) == 0))
+			saw_type = true;
+		else
+		{
+			GUC_check_errdetail("Valid conflict log types are 'all', 'insert_insert', 'update_update', 'update_delete', and 'delete_delete'.");
+			return false;
+		}
+
+		if (*cursor == ',')
+		{
+			cursor++;
+			if (*cursor == '\0')
+			{
+				GUC_check_errdetail("Conflict log types must not end with a comma.");
+				return false;
+			}
+		}
+	}
+
+	if (!saw_type && !saw_all)
+	{
+		GUC_check_errdetail("At least one conflict log type must be specified.");
+		return false;
+	}
+	if (saw_all && saw_type)
+	{
+		GUC_check_errdetail("'all' cannot be combined with individual conflict types.");
+		return false;
+	}
+
+	return true;
+}
+
 /*
  * Log the conflict to server log.
  *
@@ -666,6 +793,9 @@ pglogical_report_conflict(PGLogicalConflictType conflict_type,
 	TupleDesc desc = RelationGetDescr(rel->rel);
 	const char *idxname = "(unknown)";
 	const char *qualrelname;
+
+	if (!pglogical_should_log_conflict(conflict_type))
+		return;
 
 	memset(local_tup_ts_str, 0, MAXDATELEN);
 	if (found_local_origin)
