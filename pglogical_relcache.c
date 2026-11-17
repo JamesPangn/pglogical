@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/heapam.h"
 
 #include "catalog/pg_trigger.h"
@@ -19,9 +20,9 @@
 #include "commands/trigger.h"
 
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/catcache.h"
 #include "utils/hsearch.h"
-#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/rel.h"
 
@@ -35,11 +36,53 @@ static HTAB *PGLogicalRelationHash = NULL;
 static void pglogical_relcache_init(void);
 static int tupdesc_get_att_by_name(TupleDesc desc, const char *attname);
 
+void
+pglogical_get_local_relation_names(Oid subid, const char *remote_nspname,
+								   char **local_nspname, char **local_relname)
+{
+	RangeVar *rv = makeRangeVar("pglogical", "subscription_mapping", -1);
+	Relation maprel;
+	TupleDesc desc;
+	ScanKeyData keys[2];
+	SysScanDesc scan;
+	HeapTuple tuple;
+	Datum datum;
+	bool isnull;
+
+	*local_nspname = NULL;
+	*local_relname = NULL;
+	maprel = table_openrv(rv, AccessShareLock);
+	desc = RelationGetDescr(maprel);
+
+	/* Apply the schema mapping first. */
+	ScanKeyInit(&keys[0], 1, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(subid));
+	ScanKeyInit(&keys[1], 2, BTEqualStrategyNumber, F_NAMEEQ,
+				DirectFunctionCall1(namein, CStringGetDatum(remote_nspname)));
+	scan = systable_beginscan(maprel, 0, true, NULL, 2, keys);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		datum = heap_getattr(tuple, 3, desc, &isnull);
+		if (!isnull)
+			continue;
+		datum = heap_getattr(tuple, 4, desc, &isnull);
+		if (!isnull)
+			*local_nspname = pstrdup(NameStr(*DatumGetName(datum)));
+		break;
+	}
+	systable_endscan(scan);
+	table_close(maprel, AccessShareLock);
+}
+
 static void
 relcache_free_entry(PGLogicalRelation *entry)
 {
 	pfree(entry->nspname);
 	pfree(entry->relname);
+	if (entry->local_nspname != NULL)
+		pfree(entry->local_nspname);
+	if (entry->local_relname != NULL)
+		pfree(entry->local_relname);
 
 	if (entry->natts > 0)
 	{
@@ -83,8 +126,8 @@ pglogical_relation_open(uint32 remoteid, LOCKMODE lockmode)
 		RangeVar   *rv = makeNode(RangeVar);
 		TupleDesc	desc;
 
-		rv->schemaname = (char *) entry->nspname;
-		rv->relname = (char *) entry->relname;
+		rv->schemaname = PGLOGICAL_LOCAL_NSPNAME(entry);
+		rv->relname = PGLOGICAL_LOCAL_RELNAME(entry);
 		entry->rel = table_openrv(rv, lockmode);
 
 		desc = RelationGetDescr(entry->rel);
@@ -123,11 +166,17 @@ pglogical_relation_open(uint32 remoteid, LOCKMODE lockmode)
 
 void
 pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
-								 char *relname, int natts, char **attnames)
+								 char *relname, char *local_schemaname,
+								 char *local_relname, int natts, char **attnames)
 {
 	MemoryContext		oldcontext;
 	PGLogicalRelation  *entry;
 	bool				found;
+	bool				mapping_changed;
+	char			   *resolved_nspname;
+	char			   *resolved_relname;
+	char			   *cached_nspname = NULL;
+	char			   *cached_relname = NULL;
 	int					i;
 
 	if (PGLogicalRelationHash == NULL)
@@ -139,13 +188,39 @@ pglogical_relation_cache_update(uint32 remoteid, char *schemaname,
 	entry = hash_search(PGLogicalRelationHash, (void *) &remoteid,
 						HASH_ENTER, &found);
 
+	resolved_nspname = local_schemaname ? local_schemaname : schemaname;
+	resolved_relname = local_relname ? local_relname : relname;
+	mapping_changed = !found ||
+		strcmp(PGLOGICAL_LOCAL_NSPNAME(entry), resolved_nspname) != 0 ||
+		strcmp(PGLOGICAL_LOCAL_RELNAME(entry), resolved_relname) != 0;
+
 	if (found)
+	{
+		/* Preserve the local mapping when it is unchanged. */
+		if (!mapping_changed)
+		{
+			cached_nspname = entry->local_nspname;
+			cached_relname = entry->local_relname;
+			entry->local_nspname = NULL;
+			entry->local_relname = NULL;
+		}
 		relcache_free_entry(entry);
+	}
 
 	/* Make cached copy of the data */
 	oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 	entry->nspname = pstrdup(schemaname);
 	entry->relname = pstrdup(relname);
+	if (mapping_changed)
+	{
+		entry->local_nspname = pstrdup(resolved_nspname);
+		entry->local_relname = pstrdup(resolved_relname);
+	}
+	else
+	{
+		entry->local_nspname = cached_nspname;
+		entry->local_relname = cached_relname;
+	}
 	entry->natts = natts;
 	entry->attnames = palloc(natts * sizeof(char *));
 	for (i = 0; i < natts; i++)
@@ -182,6 +257,8 @@ pglogical_relation_cache_updater(PGLogicalRemoteRel *remoterel)
 	oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 	entry->nspname = pstrdup(remoterel->nspname);
 	entry->relname = pstrdup(remoterel->relname);
+	entry->local_nspname = pstrdup(remoterel->nspname);
+	entry->local_relname = pstrdup(remoterel->relname);
 	entry->natts = remoterel->natts;
 	entry->attnames = palloc(remoterel->natts * sizeof(char *));
 	for (i = 0; i < remoterel->natts; i++)

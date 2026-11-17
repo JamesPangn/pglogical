@@ -58,8 +58,8 @@ libpqsrv_PQexecParams(PGconn *conn,
 
 #include "pglogical_compat.h"
 
-#define PGLOGICAL_VERSION "2.4.8"
-#define PGLOGICAL_VERSION_NUM 20408
+#define PGLOGICAL_VERSION "2.4.9"
+#define PGLOGICAL_VERSION_NUM 20409
 
 #define PGLOGICAL_MIN_PROTO_VERSION_NUM 1
 #define PGLOGICAL_MAX_PROTO_VERSION_NUM 1

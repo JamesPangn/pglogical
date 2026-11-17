@@ -44,6 +44,7 @@ static char decide_datum_transfer(Form_pg_attribute att,
 
 static void pglogical_read_attrs(StringInfo in, char ***attrnames,
 								  int *nattrnames);
+
 static void pglogical_read_tuple(StringInfo in, PGLogicalRelation *rel,
 					  PGLogicalTupleData *tuple);
 
@@ -897,7 +898,7 @@ pglogical_read_tuple(StringInfo in, PGLogicalRelation *rel,
  * lockmode.
  */
 uint32
-pglogical_read_rel(StringInfo in)
+pglogical_read_rel(StringInfo in, Oid subid)
 {
 	uint8		flags;
 	uint32		relid;
@@ -906,6 +907,8 @@ pglogical_read_rel(StringInfo in)
 	char	   *relname;
 	int			natts;
 	char	  **attrnames;
+	char	   *local_schemaname = NULL;
+	char	   *local_relname = NULL;
 
 	/* read the flags */
 	flags = pq_getmsgbyte(in);
@@ -924,7 +927,12 @@ pglogical_read_rel(StringInfo in)
 	/* Get attribute description */
 	pglogical_read_attrs(in, &attrnames, &natts);
 
-	pglogical_relation_cache_update(relid, schemaname, relname, natts, attrnames);
+	pglogical_get_local_relation_names(subid, schemaname,
+									   &local_schemaname, &local_relname);
+
+	pglogical_relation_cache_update(relid, schemaname, relname,
+									local_schemaname, local_relname,
+									natts, attrnames);
 
 	return relid;
 }

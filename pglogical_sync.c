@@ -522,7 +522,7 @@ make_copy_attnamelist(PGLogicalRelation *rel)
  * COPY single table over wire.
  */
 static void
-copy_table_data(PGconn *origin_conn, PGconn *target_conn,
+copy_table_data(Oid subid, PGconn *origin_conn, PGconn *target_conn,
 				PGLogicalRemoteRel *remoterel, List *replication_sets)
 {
 	PGLogicalRelation *rel;
@@ -534,6 +534,8 @@ copy_table_data(PGconn *origin_conn, PGconn *target_conn,
 	char	   *escaped_relname = NULL;
 	char	   *escaped_repset_name = NULL;
 	char	   *escaped_relname_data = NULL;
+	char	   *local_nspname = NULL;
+	char	   *local_relname = NULL;
 	List	   *attnamelist;
 	ListCell   *lc;
 	bool		first;
@@ -545,7 +547,12 @@ copy_table_data(PGconn *origin_conn, PGconn *target_conn,
 	/* Build the relation map. */
 	StartTransactionCommand();
 	oldctx = MemoryContextSwitchTo(curctx);
-	pglogical_relation_cache_updater(remoterel);
+	pglogical_get_local_relation_names(subid, remoterel->nspname,
+									   &local_nspname, &local_relname);
+	pglogical_relation_cache_update(remoterel->relid,
+									remoterel->nspname, remoterel->relname,
+									local_nspname, local_relname,
+									remoterel->natts, remoterel->attnames);
 	rel = pglogical_relation_open(remoterel->relid, AccessShareLock);
 	attnamelist = make_copy_attnamelist(rel);
 
@@ -649,8 +656,12 @@ copy_table_data(PGconn *origin_conn, PGconn *target_conn,
 	/* Build COPY FROM query. */
 	resetStringInfo(&query);
 
-	escaped_nspname = PQescapeIdentifier(origin_conn, remoterel->nspname, strlen(remoterel->nspname));
-	escaped_relname = PQescapeIdentifier(origin_conn, remoterel->relname, strlen(remoterel->relname));
+	escaped_nspname = PQescapeIdentifier(target_conn,
+										 PGLOGICAL_LOCAL_NSPNAME(rel),
+										 strlen(PGLOGICAL_LOCAL_NSPNAME(rel)));
+	escaped_relname = PQescapeIdentifier(target_conn,
+										 PGLOGICAL_LOCAL_RELNAME(rel),
+										 strlen(PGLOGICAL_LOCAL_RELNAME(rel)));
 	appendStringInfo(&query, "COPY %s.%s ", escaped_nspname, escaped_relname);
 	PQfreemem(escaped_nspname);
 	PQfreemem(escaped_relname);
@@ -714,7 +725,7 @@ copy_table_data(PGconn *origin_conn, PGconn *target_conn,
  * Creates new connection to origin and target.
  */
 static void
-copy_tables_data(char *sub_name, const char *origin_dsn,
+copy_tables_data(Oid subid, char *sub_name, const char *origin_dsn,
 				 const char *target_dsn, const char *origin_snapshot,
 				 List *tables, List *replication_sets,
 				 const char *origin_name)
@@ -740,7 +751,8 @@ copy_tables_data(char *sub_name, const char *origin_dsn,
 		remoterel = pg_logical_get_remote_repset_table(origin_conn, rv,
 													   replication_sets);
 
-		copy_table_data(origin_conn, target_conn, remoterel, replication_sets);
+		copy_table_data(subid, origin_conn, target_conn, remoterel,
+						replication_sets);
 
 		CHECK_FOR_INTERRUPTS();
 	}
@@ -760,7 +772,7 @@ copy_tables_data(char *sub_name, const char *origin_dsn,
  * the transaction is bound to a snapshot.
  */
 static List *
-copy_replication_sets_data(char *sub_name, const char *origin_dsn,
+copy_replication_sets_data(Oid subid, char *sub_name, const char *origin_dsn,
 						   const char *target_dsn,
 						   const char *origin_snapshot,
 						   List *replication_sets, const char *origin_name)
@@ -787,7 +799,7 @@ copy_replication_sets_data(char *sub_name, const char *origin_dsn,
 	{
 		PGLogicalRemoteRel	*remoterel = lfirst(lc);
 
-		copy_table_data(origin_conn, target_conn, remoterel, replication_sets);
+		copy_table_data(subid, origin_conn, target_conn, remoterel, replication_sets);
 
 		CHECK_FOR_INTERRUPTS();
 	}
@@ -991,7 +1003,7 @@ pglogical_sync_subscription(PGLogicalSubscription *sub)
 					set_subscription_sync_status(sub->id, status);
 					CommitTransactionCommand();
 
-					tables = copy_replication_sets_data(sub->name,
+						tables = copy_replication_sets_data(sub->id, sub->name,
 														sub->origin_if->dsn,
 														sub->target_if->dsn,
 														snapshot,
@@ -1146,7 +1158,7 @@ pglogical_sync_table(PGLogicalSubscription *sub, RangeVar *table,
 		CommitTransactionCommand();
 
 		/* Copy data. */
-		copy_tables_data(sub->name, sub->origin_if->dsn,sub->target_if->dsn,
+		copy_tables_data(sub->id, sub->name, sub->origin_if->dsn,sub->target_if->dsn,
 						 snapshot, list_make1(table), sub->replication_sets,
 						 sub->slot_name);
 	}
