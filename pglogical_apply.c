@@ -354,6 +354,7 @@ handle_commit(StringInfo s)
 		replorigin_session_origin_lsn = end_lsn;
 
 		CommitTransactionCommand();
+		pgstat_report_stat(false);
 		MemoryContextSwitchTo(TopMemoryContext);
 
 		/* Track commit lsn  */
