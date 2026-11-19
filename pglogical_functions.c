@@ -389,14 +389,16 @@ pglogical_alter_node_drop_interface(PG_FUNCTION_ARGS)
 Datum
 pglogical_create_subscription(PG_FUNCTION_ARGS)
 {
-	char				   *sub_name = NameStr(*PG_GETARG_NAME(0));
-	char				   *provider_dsn = text_to_cstring(PG_GETARG_TEXT_PP(1));
-	ArrayType			   *rep_set_names = PG_GETARG_ARRAYTYPE_P(2);
-	bool					sync_structure = PG_GETARG_BOOL(3);
-	bool					sync_data = PG_GETARG_BOOL(4);
-	ArrayType			   *forward_origin_names = PG_GETARG_ARRAYTYPE_P(5);
-	Interval			   *apply_delay = PG_GETARG_INTERVAL_P(6);
-	bool					force_text_transfer = PG_GETARG_BOOL(7);
+	char			   *sub_name;
+	char			   *provider_dsn;
+	ArrayType	   *rep_set_names;
+	bool			sync_structure;
+	bool			sync_data;
+	ArrayType	   *forward_origin_names;
+	Interval	   *apply_delay;
+	bool			force_text_transfer;
+	bool			use_existing_slot;
+	char		   *requested_slot_name;
 	PGconn				   *conn;
 	PGLogicalSubscription	sub;
 	PGLogicalSyncStatus		sync;
@@ -409,6 +411,30 @@ pglogical_create_subscription(PG_FUNCTION_ARGS)
 	List				   *other_subs;
 	ListCell			   *lc;
 	NameData				slot_name;
+	int					argno;
+
+	/* Preserve the former STRICT behavior for the original arguments. */
+	for (argno = 0; argno < 8; argno++)
+		if (PG_ARGISNULL(argno))
+			PG_RETURN_NULL();
+
+	sub_name = NameStr(*PG_GETARG_NAME(0));
+	provider_dsn = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	rep_set_names = PG_GETARG_ARRAYTYPE_P(2);
+	sync_structure = PG_GETARG_BOOL(3);
+	sync_data = PG_GETARG_BOOL(4);
+	forward_origin_names = PG_GETARG_ARRAYTYPE_P(5);
+	apply_delay = PG_GETARG_INTERVAL_P(6);
+	force_text_transfer = PG_GETARG_BOOL(7);
+	use_existing_slot = !PG_ARGISNULL(8);
+	requested_slot_name = use_existing_slot ?
+		NameStr(*PG_GETARG_NAME(8)) : NULL;
+
+	if (use_existing_slot && (sync_structure || sync_data))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("synchronization cannot be enabled when using an existing replication slot"),
+				 errhint("Set synchronize_structure and synchronize_data to false; prepare the subscriber data separately.")));
 
 	/* Check that this is actually a node. */
 	localnode = get_local_node(true, false);
@@ -507,11 +533,17 @@ pglogical_create_subscription(PG_FUNCTION_ARGS)
 	sub.replication_sets = replication_sets;
 	sub.forward_origins = textarray_to_list(forward_origin_names);
 	sub.enabled = true;
-	gen_slot_name(&slot_name, get_database_name(MyDatabaseId),
-				  origin.name, sub_name);
-	sub.slot_name = pstrdup(NameStr(slot_name));
+	if (use_existing_slot)
+		sub.slot_name = pstrdup(requested_slot_name);
+	else
+	{
+		gen_slot_name(&slot_name, get_database_name(MyDatabaseId),
+					  origin.name, sub_name);
+		sub.slot_name = pstrdup(NameStr(slot_name));
+	}
 	sub.apply_delay = apply_delay;
 	sub.force_text_transfer = force_text_transfer;
+	sub.use_existing_slot = use_existing_slot;
 
 	create_subscription(&sub);
 
@@ -618,20 +650,23 @@ pglogical_drop_subscription(PG_FUNCTION_ARGS)
 		 * Note, we can't fail here since we can't assume that the remote node
 		 * is still reachable or even alive.
 		 */
-		PG_TRY();
+		if (!sub->use_existing_slot)
 		{
-			PGconn *origin_conn = pglogical_connect(sub->origin_if->dsn,
-													sub->name, "cleanup");
-			pglogical_drop_remote_slot(origin_conn, sub->slot_name);
-			PQfinish(origin_conn);
+			PG_TRY();
+			{
+				PGconn *origin_conn = pglogical_connect(sub->origin_if->dsn,
+															sub->name, "cleanup");
+				pglogical_drop_remote_slot(origin_conn, sub->slot_name);
+				PQfinish(origin_conn);
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				elog(WARNING, "could not drop slot \"%s\" on provider, you will probably have to drop it manually",
+					 sub->slot_name);
+			}
+			PG_END_TRY();
 		}
-		PG_CATCH();
-		{
-			FlushErrorState();
-			elog(WARNING, "could not drop slot \"%s\" on provider, you will probably have to drop it manually",
-				 sub->slot_name);
-		}
-		PG_END_TRY();
 
 		/* Drop the origin tracking locally. */
 		replorigin_drop_by_name(sub->slot_name, true, false);

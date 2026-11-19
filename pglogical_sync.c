@@ -345,6 +345,58 @@ retry:
 }
 
 /*
+ * Read the confirmed flush point of a slot supplied by the subscription creator.
+ */
+static XLogRecPtr
+get_existing_slot_lsn(PGconn *conn, const char *slot_name)
+{
+	PGresult	   *res;
+	const char	  *values[1];
+	Oid				types[1] = { TEXTOID };
+	XLogRecPtr		lsn;
+
+	values[0] = slot_name;
+	res = PQexecParams(conn,
+					   "SELECT plugin, active, confirmed_flush_lsn::text "
+					   "FROM pg_catalog.pg_replication_slots "
+					   "WHERE slot_name = $1 AND database = current_database()",
+					   1, types, values, NULL, NULL, 0);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		ereport(ERROR,
+				(errmsg("getting existing replication slot info failed"),
+				 errdetail("SELECT FROM pg_catalog.pg_replication_slots failed with: %s",
+						   PQerrorMessage(conn))));
+
+	if (PQntuples(res) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("logical replication slot %s does not exist in the provider database",
+						slot_name)));
+
+	if (PQgetisnull(res, 0, 0) ||
+		(strcmp(PQgetvalue(res, 0, 0), "pglogical_output") != 0 &&
+		 strcmp(PQgetvalue(res, 0, 0), "pglogical") != 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("slot %s is not a pglogical logical replication slot", slot_name)));
+
+	if (strcmp(PQgetvalue(res, 0, 1), "t") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("logical replication slot %s is active", slot_name)));
+
+	if (PQgetisnull(res, 0, 2))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("logical replication slot %s has no confirmed flush LSN", slot_name)));
+
+	lsn = DatumGetLSN(DirectFunctionCall1Coll(pg_lsn_in, InvalidOid,
+										 CStringGetDatum(PQgetvalue(res, 0, 2))));
+	PQclear(res);
+	return lsn;
+}
+
+/*
  * Get or create replication origin for a given slot.
  */
 static RepOriginId
@@ -816,30 +868,34 @@ pglogical_sync_worker_cleanup(PGLogicalSubscription *sub)
 {
 	PGconn			   *origin_conn;
 
-	/* Drop the slot on the remote side. */
-	origin_conn = pglogical_connect(sub->origin_if->dsn, sub->name,
-									"cleanup");
-	/* Wait for slot to be free. */
-	while (!got_SIGTERM)
+	/* A supplied slot remains caller-owned until initial setup succeeds. */
+	if (!sub->use_existing_slot)
 	{
-		int	rc;
+		/* Drop the slot on the remote side. */
+		origin_conn = pglogical_connect(sub->origin_if->dsn, sub->name,
+										"cleanup");
+		/* Wait for slot to be free. */
+		while (!got_SIGTERM)
+		{
+			int	rc;
 
-		if (!pglogical_remote_slot_active(origin_conn, sub->slot_name))
-			break;
+			if (!pglogical_remote_slot_active(origin_conn, sub->slot_name))
+				break;
 
-		rc = WaitLatch(&MyProc->procLatch,
-					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   1000L);
+			rc = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   1000L);
 
-        ResetLatch(&MyProc->procLatch);
+            ResetLatch(&MyProc->procLatch);
 
-		/* emergency bailout if postmaster has died */
-		if (rc & WL_POSTMASTER_DEATH)
-			proc_exit(1);
+			/* emergency bailout if postmaster has died */
+			if (rc & WL_POSTMASTER_DEATH)
+				proc_exit(1);
+		}
+
+		pglogical_drop_remote_slot(origin_conn, sub->slot_name);
+		PQfinish(origin_conn);
 	}
-
-	pglogical_drop_remote_slot(origin_conn, sub->slot_name);
-	PQfinish(origin_conn);
 
 	/* Drop the origin tracking locally. */
 	if (replorigin_session_origin != InvalidRepOriginId)
@@ -931,13 +987,21 @@ pglogical_sync_subscription(PGLogicalSubscription *sub)
 											 -1,
 											 "failover");
 #endif
-		origin_conn_repl = pglogical_connect_replica(sub->origin_if->dsn,
+		origin_conn_repl = NULL;
+		if (sub->use_existing_slot)
+		{
+			lsn = get_existing_slot_lsn(origin_conn, sub->slot_name);
+			snapshot = NULL;
+		}
+		else
+		{
+			origin_conn_repl = pglogical_connect_replica(sub->origin_if->dsn,
 													 sub->name, "snap");
-
-		snapshot = ensure_replication_slot_snapshot(origin_conn,
+			snapshot = ensure_replication_slot_snapshot(origin_conn,
 													origin_conn_repl,
 													sub->slot_name,
 													use_failover_slot, &lsn);
+		}
 
 		PQfinish(origin_conn);
 
@@ -1064,11 +1128,18 @@ pglogical_sync_subscription(PGLogicalSubscription *sub)
 		PG_END_ENSURE_ERROR_CLEANUP(pglogical_sync_worker_cleanup_error_cb,
 									PointerGetDatum(sub));
 
-		PQfinish(origin_conn_repl);
+		if (origin_conn_repl)
+			PQfinish(origin_conn_repl);
 
 		status = SYNC_STATUS_CATCHUP;
 		StartTransactionCommand();
 		set_subscription_sync_status(sub->id, status);
+		if (sub->use_existing_slot)
+		{
+			/* The slot is now adopted and subsequent table syncs can recreate it. */
+			sub->use_existing_slot = false;
+			alter_subscription(sub);
+		}
 		CommitTransactionCommand();
 	}
 

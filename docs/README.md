@@ -299,7 +299,8 @@ Nodes can be added and removed dynamically using the SQL interfaces.
 
 - `pglogical.create_subscription(subscription_name name, provider_dsn text,
   replication_sets text[], synchronize_structure boolean,
-  synchronize_data boolean, forward_origins text[], apply_delay interval)`
+  synchronize_data boolean, forward_origins text[], apply_delay interval,
+  force_text_transfer boolean, slot_name name DEFAULT NULL)`
   Creates a subscription from current node to the provider node. Command does
   not block, just initiates the action.
 
@@ -322,6 +323,29 @@ Nodes can be added and removed dynamically using the SQL interfaces.
     using a text representation (which is slower, but may be used to
     change the type of a replicated column on the subscriber), default
     is false
+  - `slot_name` - optional name of an existing logical replication slot on
+    the provider. When supplied, the subscription starts from that slot's
+    `confirmed_flush_lsn`. The slot must use `pglogical_output` (or `pglogical`), be
+    inactive, and belong to the provider database. Set both
+    `synchronize_structure` and `synchronize_data` to false; prepare the
+    subscriber schema and data to match the provider state at the slot's
+    `confirmed_flush_lsn`.
+
+  For example, after preparing the subscriber to match the provider state at
+  the slot's `confirmed_flush_lsn`:
+
+  ```sql
+  -- On the provider, choose the confirmed starting point.
+  SELECT * FROM pg_replication_slot_advance('my_existing_slot', '0/12345678');
+
+  -- Prepare the subscriber through the returned end_lsn, then attach it.
+  SELECT pglogical.create_subscription(
+      subscription_name := 'my_subscription',
+      provider_dsn := 'host=provider dbname=mydb',
+      synchronize_structure := false,
+      synchronize_data := false,
+      slot_name := 'my_existing_slot');
+  ```
 
   The `subscription_name` is used as `application_name` by the replication
   connection. This means that it's visible in the `pg_stat_replication`

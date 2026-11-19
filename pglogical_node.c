@@ -87,7 +87,7 @@ typedef struct SubscriptionTuple
 	NameData	sub_slot_name;
 } SubscriptionTuple;
 
-#define Natts_subscription			12
+#define Natts_subscription			13
 #define Anum_sub_id					1
 #define Anum_sub_name				2
 #define Anum_sub_origin				3
@@ -100,6 +100,7 @@ typedef struct SubscriptionTuple
 #define Anum_sub_forward_origins	10
 #define Anum_sub_apply_delay		11
 #define Anum_sub_force_text_transfer 12
+#define Anum_sub_use_existing_slot 13
 
 /*
  * We impose same validation rules as replication slot name validation does.
@@ -742,6 +743,7 @@ create_subscription(PGLogicalSubscription *sub)
 		nulls[Anum_sub_apply_delay - 1] = true;
 
 	values[Anum_sub_force_text_transfer - 1] = BoolGetDatum(sub->force_text_transfer);
+	values[Anum_sub_use_existing_slot - 1] = BoolGetDatum(sub->use_existing_slot);
 
 	tup = heap_form_tuple(tupDesc, values, nulls);
 
@@ -827,6 +829,7 @@ alter_subscription(PGLogicalSubscription *sub)
 
 	values[Anum_sub_apply_delay - 1] = IntervalPGetDatum(sub->apply_delay);
 	values[Anum_sub_force_text_transfer - 1] = BoolGetDatum(sub->force_text_transfer);
+	values[Anum_sub_use_existing_slot - 1] = BoolGetDatum(sub->use_existing_slot);
 
 	newtup = heap_modify_tuple(oldtup, tupDesc, values, nulls, replaces);
 
@@ -936,6 +939,13 @@ subscription_fromtuple(HeapTuple tuple, TupleDesc desc)
 		sub->force_text_transfer = false;
 	else
 		sub->force_text_transfer = DatumGetBool(d);
+
+	/* Get whether the subscription is attaching to a pre-existing slot. */
+	d = heap_getattr(tuple, Anum_sub_use_existing_slot, desc, &isnull);
+	if (isnull)
+		sub->use_existing_slot = false;
+	else
+		sub->use_existing_slot = DatumGetBool(d);
 
 	return sub;
 }
